@@ -1,0 +1,282 @@
+//Package datamapper provides the definitions of datamapper
+package datamapper
+
+import (
+	"testtrx/model"
+
+	"github.com/go-errors/errors"
+	"github.com/gocql/gocql"
+)
+
+//User is a struct of datamapper for user domain model
+type User struct {
+	dbSession         *gocql.Session //database connection session object
+	pagedQuery        *gocql.Query   //query object (storing this is required for result paging)
+	pageSize          int            //size of page (no of records per page) for query result paging
+	previousPageState []byte         //page state of previous page for result paging purpose
+	currentPageState  []byte         //page state of current page for result paging purpose
+	nextPageState     []byte         //page state of next page for result paging purpose
+}
+
+//NewUser is a function for initializing a new user datamapper
+func NewUser(session *gocql.Session) *User {
+	//Note: pageSize defaults to 10
+	return &User{session, nil, 10, nil, nil, nil}
+}
+
+//SetPageSize is a function for setting query result page size (no of records perpage)
+func (u *User) SetPageSize(size int) {
+	u.pageSize = size
+}
+
+//FindByID is a function for finding an user by id
+func (u *User) FindByID(id string) (*model.User, *errors.Error) {
+	userModel := model.User{}
+
+	if err := u.dbSession.Query(`SELECT 
+			user_email,
+			password,
+			name,
+			status,
+			last_activity,
+			auth_token,
+			google_token,
+			facebook_token
+			FROM user
+			WHERE user_email = ? LIMIT 1`, id).
+		Consistency(gocql.One).
+		Scan(&userModel.Email,
+			&userModel.Password,
+			&userModel.Name,
+			&userModel.Status,
+			&userModel.LastActivity,
+			&userModel.AuthToken,
+			&userModel.GoogleToken,
+			&userModel.FacebookToken); err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+	return &userModel, nil
+}
+
+/*
+//FindAll is a function for finding all user
+func (u *User) FindAll() ([]*model.User, *errors.Error) {
+	var userList []*model.User
+	m := map[string]interface{}{}
+
+	iterable := u.dbSession.Query(`SELECT
+		user_email,
+		password,
+		name,
+		status,
+		last_activity,
+		auth_token,
+		google_token,
+		facebook_token
+	FROM user`).Iter()
+
+	for iterable.MapScan(m) {
+		userList = append(userList, &model.User{
+			Email:         m["user_email"].(string),
+			Password:      m["password"].(string),
+			Name:          m["name"].(string),
+			Status:        m["status"].(string),
+			LastActivity:  m["last_activity"].(time.Time),
+			AuthToken:     m["auth_token"].(string),
+			GoogleToken:   m["google_token"].(string),
+			FacebookToken: m["facebook_token"].(string),
+		})
+		//NOTE: important! reset the map after each iteration
+		m = map[string]interface{}{}
+	}
+	//close the iterator (to get any errors that occured during or after iteration)
+	//see: https://github.com/gocql/gocql/issues/57#issuecomment-25573670
+	if err := iterable.Close(); err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+	return userList, nil
+}
+*/
+
+/*
+//FindAll is a function for finding all user
+func (u *User) FindAll() ([]*model.User, *errors.Error) {
+	iter := u.dbSession.Query(`SELECT
+		user_email,
+		password,
+		name,
+		status,
+		last_activity,
+		auth_token,
+		google_token,
+		facebook_token
+	FROM user`).Iter()
+
+	var done = false
+	var userList []*model.User
+
+	for done == false {
+		userModel := model.User{}
+		ok := iter.Scan(
+			&userModel.Email,
+			&userModel.Password,
+			&userModel.Name,
+			&userModel.Status,
+			&userModel.LastActivity,
+			&userModel.AuthToken,
+			&userModel.GoogleToken,
+			&userModel.FacebookToken,
+		)
+		if ok {
+			userList = append(userList, &userModel)
+		} else {
+			done = true
+		}
+	}
+	//close the iterator (to get any errors that occured during or after iteration)
+	//see: https://github.com/gocql/gocql/issues/57#issuecomment-25573670
+	if err := iter.Close(); err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+	return userList, nil
+}
+*/
+
+//FindAll is a function for finding all user with paging capability
+func (u *User) FindAll() ([]*model.User, *errors.Error) {
+	u.pagedQuery = u.dbSession.Query(`SELECT
+		user_email,
+		password,
+		name,
+		status,
+		last_activity,
+		auth_token,
+		google_token,
+		facebook_token
+	FROM user`)
+	iter := u.pagedQuery.PageState(nil).PageSize(u.pageSize).Iter()
+	//since this is the first time the query is executed, previousPageState is the same as current page State
+	u.previousPageState = nil
+	u.currentPageState = nil
+	//the iterator page state becomes page state for next page
+	u.nextPageState = iter.PageState()
+
+	return u.scanQueryResult(iter)
+}
+
+//PreviousPage is a function for getting the previous page query results of the previously executed 'select' query
+func (u *User) PreviousPage() ([]*model.User, *errors.Error) {
+	temp := u.previousPageState
+	iter := u.pagedQuery.PageState(temp).PageSize(u.pageSize).Iter()
+	//u.currentPageState becomes the next page state
+	u.nextPageState = u.currentPageState
+	//u.currentPageState is previously from u.nextpageState before query execution
+	u.currentPageState = temp
+	//the iterator page state becomes page state for the next page
+	u.nextPageState = iter.PageState()
+	return u.scanQueryResult(iter)
+}
+
+//NextPage is a function for getting the previous page query results of the previously executed 'select' query
+func (u *User) NextPage(pageSize int) ([]*model.User, *errors.Error) {
+	temp := u.nextPageState
+	iter := u.pagedQuery.PageState(temp).PageSize(u.pageSize).Iter()
+	//u.currentPageState becomes the previous page state
+	u.previousPageState = u.currentPageState
+	//u.currentPageState is previously from u.nextpageState before query execution
+	u.currentPageState = temp
+	//the iterator page state becomes page state for the next page
+	u.nextPageState = iter.PageState()
+	return u.scanQueryResult(iter)
+}
+
+//scanQueryResult is a function for scanning records to model objects from an iterator of query result
+func (u *User) scanQueryResult(iter *gocql.Iter) ([]*model.User, *errors.Error) {
+	var done = false
+	var userList []*model.User
+
+	for done == false {
+		userModel := model.User{}
+		ok := iter.Scan(
+			&userModel.Email,
+			&userModel.Password,
+			&userModel.Name,
+			&userModel.Status,
+			&userModel.LastActivity,
+			&userModel.AuthToken,
+			&userModel.GoogleToken,
+			&userModel.FacebookToken,
+		)
+		if ok {
+			userList = append(userList, &userModel)
+		} else {
+			done = true
+		}
+	}
+	//close the iterator (to get any errors that occured during or after iteration)
+	//see: https://github.com/gocql/gocql/issues/57#issuecomment-25573670
+	if err := iter.Close(); err != nil {
+		return nil, errors.Wrap(err, 0)
+	}
+	return userList, nil
+}
+
+//Insert is a function for inserting new user
+func (u *User) Insert(user *model.User) (bool, *errors.Error) {
+	if err := u.dbSession.Query(`
+		INSERT INTO user (
+			user_email, 
+			password, 
+			name,
+			status, 
+			last_activity,
+			auth_token,
+			google_token,
+			facebook_token
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		user.Email,
+		user.Password,
+		user.Name,
+		user.Status,
+		user.LastActivity,
+		user.AuthToken,
+		user.GoogleToken,
+		user.FacebookToken,
+	).Exec(); err != nil {
+		return false, errors.Wrap(err, 0)
+	}
+	return true, nil
+}
+
+//Update is a function for updating a user
+func (u *User) Update(user *model.User) (bool, *errors.Error) {
+	if err := u.dbSession.Query(`
+		UPDATE user SET
+			password = '` + user.Password + `',
+			name = '` + user.Name + `',
+			status = '` + user.Status + `',
+			last_activity = '` + user.LastActivity.String() + `',
+			auth_token = '` + user.AuthToken + `',
+			google_token = '` + user.GoogleToken + `',
+			facebook_token = '` + user.FacebookToken + `'
+		WHERE user_email = '` + user.Email + `' IF EXISTS`).Exec(); err != nil {
+		return false, errors.Wrap(err, 0)
+	}
+	//NOTE: there is no way to get affected rows of an update/delete query in cassandra
+	//see: https://stackoverflow.com/questions/28611459/how-to-know-affected-rows-in-cassandracql
+	//if the query was performed successfully without any problem, then consider query is successful
+	return true, nil
+}
+
+//Delete is a function for deleting user
+func (u *User) Delete(user *model.User) (bool, *errors.Error) {
+	if err := u.dbSession.Query(`
+		DELETE FROM user 
+		WHERE user_email = '` + user.Email + `' IF EXISTS`).Exec(); err != nil {
+		return false, errors.Wrap(err, 0)
+	}
+	//NOTE: there is no way to get affected rows of an update/delete query in cassandra
+	//see: https://stackoverflow.com/questions/28611459/how-to-know-affected-rows-in-cassandracql
+	//if the query was performed successfully without any problem, then consider query is successful
+	return true, nil
+}
