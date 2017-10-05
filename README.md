@@ -1,5 +1,5 @@
 # testtrx
-Uses [dep] (https://github.com/golang/dep) for package management
+Uses [dep](https://github.com/golang/dep) for package management
 
 Instructions
 
